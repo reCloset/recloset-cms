@@ -28,6 +28,4 @@ jobs:
         name: cms
         runtime: nodejs14
         entry_point: cmsEntry
-        region: asia-southeast1
-        project: ${{ secrets.gcp_project }}
         credentials: ${{ secrets.gcp_credentials }}
