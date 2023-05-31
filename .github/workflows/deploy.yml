@@ -12,7 +12,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
 
     - name: Set up Node.js
       uses: actions/setup-node@v2
@@ -26,6 +26,6 @@ jobs:
       uses: google-github-actions/deploy-cloud-functions@v0.1.0
       with:
         name: cms
-        runtime: nodejs14
+        runtime: nodejs18
         entry_point: cmsEntry
         credentials: ${{ secrets.gcp_credentials }}
