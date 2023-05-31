@@ -8,7 +8,7 @@
  */
 
 const {onRequest} = require("firebase-functions/v2/https");
-const logger = require("firebase-functions/logger");
+// const logger = require("firebase-functions/logger");
 const nsfwjs = require("nsfwjs");
 const busboy = require('busboy');
 const os = require('os');
@@ -19,7 +19,7 @@ const tf = require('@tensorflow/tfjs-node');
 // Create and deploy your first functions
 // https://firebase.google.com/docs/functions/get-started
 
-exports.helloWorld = onRequest(async (req, res) => {
+exports.checkImage = onRequest(async (req, res) => {
     if (req.method !== 'POST') {
         return res.status(400).json({ error: 'Method not allowed' });
     }
