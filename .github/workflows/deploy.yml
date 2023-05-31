@@ -1,0 +1,33 @@
+name: Deploy Cloud Function
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: 14
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Deploy a Cloud Function
+      uses: google-github-actions/deploy-cloud-functions@v0.1.0
+      with:
+        name: my-function
+        runtime: nodejs14
+        entry_point: myFunction // Replace with the actual entry point name
+        region: asia-southeast1
+        project: ${{ secrets.gcp_project }}
+        credentials: ${{ secrets.gcp_credentials }}
