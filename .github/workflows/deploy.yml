@@ -25,9 +25,9 @@ jobs:
     - name: Deploy a Cloud Function
       uses: google-github-actions/deploy-cloud-functions@v0.1.0
       with:
-        name: my-function
+        name: cms
         runtime: nodejs14
-        entry_point: cms
+        entry_point: cmsEntry
         region: asia-southeast1
         project: ${{ secrets.gcp_project }}
         credentials: ${{ secrets.gcp_credentials }}
