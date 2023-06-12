@@ -1,4 +1,5 @@
 const {onRequest, HttpsError} = require("firebase-functions/v2/https");
+const functions = require("firebase-functions");
 const nsfwjs = require("nsfwjs");
 const os = require('os');
 const path = require('path');
@@ -9,9 +10,11 @@ const admin = require('firebase-admin');
 const busboy = require('busboy');
 const uuid = require('uuid')
 const {getFirestore} = require("firebase-admin/firestore");
+const sharp = require('sharp');
 
 const NSFW_THRESHOLD = 0.15;
 const BUCKET_NAME = "recloset-99e15"
+const DIRECTORY_NAME = "images"
 
 !admin.apps.length 
 ? admin.initializeApp({
@@ -40,7 +43,8 @@ app.post('/', async (req, res) => {
     bb.on('file', (name, file, info) => {
         const { filename, encoding, mimeType } = info;
 
-        if (mimeType !== 'image/jpeg' && mimeType !== 'image/jpg' && mimeType !== 'image/png') {
+        if (mimeType !== 'image/jpeg' && mimeType !== 'image/jpg' && mimeType !== 'image/png' && mimeType !== 'application/octet-stream') {
+            console.error('Unsupported file type: ', mimeType);
             return res.status(400).json({ error: 'Unsupported file type' });
         }
 
@@ -58,55 +62,68 @@ app.post('/', async (req, res) => {
 
             // Create a promise to read and process the uploaded image file
         const imageFilePromise = new Promise((resolve, reject) => {
-            writeStream.on('finish', () => {
-            fs.readFile(imageFilePath, async (err, buffer) => {
-                if (err) {
-                reject(err);
-                } else {
+            writeStream.on('finish', async () => {
+                try {
+                    // Read the image buffer
+                    let buffer = await fs.promises.readFile(imageFilePath);
+                    
+                    // Convert to JPEG if it isn't
+                    if (mimeType !== 'image/jpeg') {
+                        buffer = await sharp(buffer).jpeg().toBuffer();
+                    }
+            
+                    // Process the converted image buffer
                     const image = await tf.node.decodeImage(buffer, 3);
-        
-                    const model = await nsfwModel
-
-                    const score = model.classify(image)
-                    .then((predictions) => {
-                        image.dispose();
-                        const totalNsfwScore = predictions.reduce((acc, curr) => {
-                            if (curr.className === "Neutral") {
-                            return acc;
-                            } else {
-                            return acc + curr.probability;
-                            }
-                        }, 0);
-                        return { filename, buffer, totalNsfwScore };
-                    })
-                    .catch((err) => {
-                        reject(err);
-                    });
-        
+                    const model = await nsfwModel;
+            
+                    const predictions = await model.classify(image);
+                    const totalNsfwScore = predictions.reduce((acc, curr) => {
+                      if (curr.className === "Neutral") {
+                        return acc;
+                      } else {
+                        return acc + curr.probability;
+                      }
+                    }, 0);
+            
+                    image.dispose();
+            
                     // Resolve with the predictions for this image
-                    resolve(score);
-                }
-    
-                // Delete the temporary file
-                fs.unlinkSync(imageFilePath);
-            });
+                    resolve({ filename, buffer: buffer, totalNsfwScore });
+                  } catch (err) {
+                    reject(err);
+                  } finally {
+                    // Delete the temporary file
+                    fs.unlinkSync(imageFilePath);
+                  }
             });
     
             writeStream.on('error', (err) => {
-            reject(err);
+                reject(err);
             });
         });
     
         // Add the image file promise to the array
         imageFilePromises.push(imageFilePromise);
-        });
+    });
 
     bb.on('field', (fieldname, value) => {
-        formFields[fieldname] = value;
+        try {
+            if (fieldname === "dealOption" || fieldname === 'secondCategory') {
+                formFields[fieldname] = JSON.parse(value);
+            } else if (fieldname === "credits" || fieldname === "timestamp") {
+                formFields[fieldname] = Number(value)
+            } else {
+                formFields[fieldname] = value;
+            }
+        } catch (e) {
+            res.status(400).json({ error: `Invalid form data ${e}` });
+        }
+        
     });
 
     bb.on('finish', () => {
         if (imageFilePromises.length === 0) {
+            console.error('No images provided')
             return res.status(400).json({ error: 'No images provided' });
         }
     
@@ -117,50 +134,65 @@ app.post('/', async (req, res) => {
                 return result.totalNsfwScore > NSFW_THRESHOLD;
             });
 
+            const imageUrls = await Promise.all(results.map(async ({ filename, buffer }) => {
+                const fileExtension = path.extname(filename);
+                const uniqueFilename = `${uuid.v4()}${fileExtension}`;
+                const file = bucket.file(`${DIRECTORY_NAME}/${uniqueFilename}`);
+
+                // Determine the content type based on the file extension
+                let contentType;
+                if (fileExtension === '.jpg' || fileExtension === '.jpeg') {
+                    contentType = 'image/jpeg';
+                } else if (fileExtension === '.png') {
+                    contentType = 'image/png';
+                } else {
+                    contentType = 'application/octet-stream'; // default content type
+                }
+    
+                // Upload the image buffer to the storage bucket
+                await file.save(buffer, {
+                    metadata: { contentType: contentType }
+                });
+
+                await file.makePublic();
+    
+                // Return the image URL
+                const imageUrl = `https://storage.googleapis.com/${BUCKET_NAME}/${DIRECTORY_NAME}/${uniqueFilename}`;
+
+                return imageUrl;
+            }));
+            
+            const itemData = {
+                ...formFields,
+                images: imageUrls
+            };
+
+            const firestore = admin.firestore();
+            const userId = formFields['owner'];
+            const userRef = firestore.collection('users').doc(userId);
+            const userSnapshot = await userRef.get();
+
+            if (!userSnapshot.exists) {
+                return res.status(400).json({ error: "User doesn't exist" });
+            }
+            
+
             if (nsfwImages.length > 0) {
-                return res.status(400).json({ error: 'NSFW images detected' });
+                const { id } = await firestore.collection('flaggedItems').add(itemData);
+                const flaggedItems = userSnapshot.get('flaggedItems') || [];
+                flaggedItems.push(id);
+                await userRef.update({ flaggedItems });
+                return res.status(200).json({ message: 'Your item is under approval.' });
             } else {
-                // console.log(results)
-                // Upload approved images to a storage bucket
-                const imageUrls = await Promise.all(results.map(async ({ filename, buffer }) => {
-                    const fileExtension = path.extname(filename);
-                    const uniqueFilename = `${uuid.v4()}${fileExtension}`;
-                    const file = bucket.file(`approved-images/${uniqueFilename}`);
-
-                    // Determine the content type based on the file extension
-                    let contentType;
-                    if (fileExtension === '.jpg' || fileExtension === '.jpeg') {
-                        contentType = 'image/jpeg';
-                    } else if (fileExtension === '.png') {
-                        contentType = 'image/png';
-                    } else {
-                        contentType = 'application/octet-stream'; // default content type
-                    }
-        
-                    // Upload the image buffer to the storage bucket
-                    await file.save(buffer, {
-                        metadata: { contentType: contentType }
-                    });
-
-                    await file.makePublic();
-        
-                    // Return the image URL
-                    const imageUrl = `https://storage.googleapis.com/${BUCKET_NAME}/approved-images/${uniqueFilename}`;
-
-                    return imageUrl;
-                }));
-
-                const itemData = {
-                    ...formFields,
-                    images: imageUrls
-                };
-
-                const firestore = admin.firestore();
-                await firestore.collection('approvedItems').add(itemData);
+                const { id } = await firestore.collection('items').add(itemData);
+                const listedItems = userSnapshot.get('listedItems') || [];
+                listedItems.push(id);
+                await userRef.update({ listedItems });
                 return res.status(200).json({ message: 'Item added successfully!', itemData });
             }
         })
         .catch((err) => {
+            console.error(err);
             return res.status(400).json({ error: `Error while processing images: ${err}` });
         });
 
@@ -169,7 +201,7 @@ app.post('/', async (req, res) => {
     bb.end(req.rawBody);
 });
 
-exports.checkImage = onRequest(app);
+exports.checkImage = functions.runWith({ memory: "512MB" }).region('asia-southeast1').https.onRequest(app);
 
 exports.createTransaction = functions.region('asia-southeast1').https.onCall(async (req, context) => {
 
